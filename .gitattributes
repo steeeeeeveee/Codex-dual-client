@@ -1,0 +1,4 @@
+# Preserve package bytes so vendor integrity hashes survive Windows checkout.
+static/vendor/** -text
+# Upstream license text is copied verbatim, including its original whitespace.
+static/vendor/*LICENSE* whitespace=-blank-at-eol

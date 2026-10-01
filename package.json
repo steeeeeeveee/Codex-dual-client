@@ -1,0 +1,16 @@
+{
+  "name": "codex-private-mobile",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "vendor": "node scripts/vendor-markdown.mjs",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@highlightjs/cdn-assets": "11.12.0",
+    "dompurify": "3.4.16",
+    "jsdom": "30.1.1",
+    "katex": "0.18.9",
+    "marked": "18.0.14"
+  }
+}

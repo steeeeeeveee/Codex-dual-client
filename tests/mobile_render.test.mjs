@@ -1,0 +1,63 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {JSDOM} from 'jsdom';
+
+test('real phone app renders history and coalesced stream while queue and questions stay literal',async t=>{
+  const html=await readFile(new URL('../static/index.html',import.meta.url),'utf8');
+  const dom=new JSDOM(html,{url:'http://127.0.0.1:8769/'}),win=dom.window,doc=win.document;
+  const original=new Map(),frames=new Map(),intervals=[],streams=[];let frameId=0;
+  const set=(name,value)=>{original.set(name,Object.getOwnPropertyDescriptor(globalThis,name));Object.defineProperty(globalThis,name,{value,writable:true,configurable:true});};
+  t.after(()=>{dom.window.close();for(const [name,value] of original){if(value)Object.defineProperty(globalThis,name,value);else delete globalThis[name];}});
+  for(const name of ['window','document','sessionStorage','localStorage','Option'])set(name,name==='window'?win:win[name]);
+  set('requestAnimationFrame',callback=>{frames.set(++frameId,callback);return frameId;});set('cancelAnimationFrame',id=>frames.delete(id));
+  set('setInterval',callback=>{intervals.push(callback);return intervals.length;});
+  set('EventSource',class{constructor(){this.listeners={};streams.push(this);}addEventListener(name,callback){this.listeners[name]=callback;}close(){this.closed=true;}emit(data){this.listeners.transcript({data:JSON.stringify(data)});}});
+  const tid='one';const active={id:'active',status:'inProgress',items:[]};
+  const old={id:'old',status:'completed',items:[{id:'u',type:'userMessage',content:[{type:'text',text:'**用户原文**'}]},{id:'a',type:'agentMessage',text:'**历史加粗**\n\n\\(\\frac{x}{y}\\)'}]};
+  const thread={id:tid,name:'Test',turns:[old,active]};
+  const state={mode:'shared',serviceMode:'shared',threadId:tid,thread,desktop:{connected:true},queue:[{id:'q',text:'**排队原文**'}],outbox:[],pending:[],turnId:active.id};
+  const requests=[];
+  set('fetch',async(path,options)=>{requests.push([path,options.method]);let data;
+    if(path.startsWith('/api/state'))data=state;
+    else if(path==='/api/threads')data={data:[{id:tid,name:'Test'}]};
+    else if(path.startsWith('/api/thread/'))data={mode:state.mode,thread};
+    else if(path==='/api/threads/requests')data={data:[]};
+    else if(path==='/api/capabilities')data={models:[],projects:[],desktop:{connected:true}};
+    else throw new Error('Unexpected request '+path);
+    return {ok:true,status:200,json:async()=>data};
+  });
+  win.sessionStorage.setItem('selectedThread','one');
+  await import('../static/app.js');
+  for(let i=0;i<50&&!intervals.length;i++)await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal(intervals.length,1);assert.equal(doc.querySelector('#history strong').textContent,'历史加粗');assert.ok(doc.querySelector('#history .katex'));
+  assert.equal(doc.querySelector('.message.user .body').textContent,'**用户原文**');assert.equal(doc.querySelector('#desktopQueue').textContent,'**排队原文**');assert.equal(doc.querySelector('.thinking').textContent,'');assert.equal(doc.querySelector('.thinking:not([hidden])').textContent,'正在思考');
+  const bodyText='**新回复**\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n```js\nconst a = 1;\n```\n\n\\(x^2\\)';
+  const snapshot=(text,status='inProgress')=>({threadId:tid,connected:true,turns:[{...active,status,items:[{id:'new',type:'agentMessage',text}]}]});
+  const before=doc.querySelector('#history').innerHTML;
+  streams[0].emit(snapshot('**新'));streams[0].emit(snapshot(bodyText));assert.equal(frames.size,1);assert.equal(doc.querySelector('#history').innerHTML,before);
+  const flush=()=>{const pending=[...frames.values()];frames.clear();pending.forEach(fn=>fn());};flush();
+  assert.equal(doc.querySelectorAll('#history table').length,1);assert.equal(doc.querySelectorAll('#history .code-block').length,1);assert.equal(doc.querySelectorAll('#history .katex').length,2);assert.equal(doc.querySelectorAll('#history .message').length,3);
+  const scroll=doc.getElementById('chatScroll');
+  Object.defineProperty(scroll,'clientHeight',{value:500});Object.defineProperty(scroll,'scrollHeight',{get:()=>doc.querySelector('#history').textContent.includes('追加段落')?1200:1000});
+  scroll.scrollTop=180;streams[0].emit(snapshot(bodyText+'\n\n追加段落'));flush();assert.equal(scroll.scrollTop,180);
+  streams[0].emit(snapshot(bodyText));flush();scroll.scrollTop=500;
+  streams[0].emit(snapshot(bodyText+'\n\n追加段落'));flush();assert.equal(scroll.scrollTop,1200);
+  streams[0].emit(snapshot(bodyText));flush();
+  const body=doc.querySelectorAll('#history .message .body')[2],child=body.firstChild;
+  streams[0].emit(snapshot(bodyText,'completed'));flush();assert.equal(doc.querySelectorAll('.thinking:not([hidden])').length,0);assert.equal(body.firstChild,child);
+  state.mode='legacy';state.turnId=null;state.items=[{id:'legacy-live',type:'agentMessage',text:'**旧模式实时**\n\n```js\nconst x = 2;\n```\n\n\\(y^2\\)'}];
+  await intervals[0]();assert.equal(doc.querySelector('#history strong').textContent,'历史加粗');assert.equal(doc.querySelector('#live strong').textContent,'旧模式实时');assert.ok(doc.querySelector('#live .katex'));assert.ok(doc.querySelector('#live .code-block'));assert.ok(streams[0].closed);
+  state.mode='shared';state.turnId=active.id;
+  state.pending=[{clientRequestId:'question',method:'item/tool/requestUserInput',params:{threadId:tid,questions:[{id:'choice',question:'**真实问题原文**',options:[{label:'甲',description:'测试'}]}]}}];
+  await intervals[0]();assert.ok(doc.querySelector('#questions').textContent.includes('**真实问题原文**'));assert.equal(doc.querySelectorAll('#questions .markdown').length,0);
+  // Ordinary polling must not snap a nearby reading position to the bottom,
+  // including while the composer has focus and contains an unsent draft.
+  const prompt=doc.getElementById('prompt');prompt.value='尚未发送的文字';prompt.focus();prompt.dispatchEvent(new win.Event('input'));
+  scroll.scrollTop=460;await intervals[0]();await intervals[0]();assert.equal(scroll.scrollTop,460);assert.equal(prompt.value,'尚未发送的文字');
+  // A pending frame from a closed subscription must not overwrite a new draft.
+  streams.at(-1).emit(snapshot('不应出现在草稿'));assert.equal(frames.size,1);
+  doc.querySelector('#newThread').click();for(let i=0;i<50&&doc.querySelector('#newLocation').hidden;i++)await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal(frames.size,0);assert.ok(streams.at(-1).closed);assert.equal(doc.querySelector('#welcome').hidden,false);assert.equal(doc.querySelector('#history').textContent,'');assert.equal(doc.querySelector('#history .markdown'),null);
+  assert.ok(requests.every(([,method])=>method==='GET'));
+});

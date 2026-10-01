@@ -1,0 +1,2 @@
+:root{--composer-safe-bottom:34px}
+#fixtureKeyboard{position:fixed;left:0;right:0;bottom:0;background:#d9dce2;color:#687080;text-align:center;padding-top:28px;font-size:13px;z-index:30;border-top:1px solid #bbc1cd}

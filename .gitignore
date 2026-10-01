@@ -1,0 +1,15 @@
+.venv/
+runtime/
+work/
+__pycache__/
+node_modules/
+outputs/*凭据*
+
+.env
+.env.*
+*.pem
+*.key
+*.sqlite
+*.sqlite3
+*.db
+outputs/
